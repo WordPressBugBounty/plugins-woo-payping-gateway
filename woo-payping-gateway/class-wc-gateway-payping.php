@@ -168,7 +168,7 @@ if( class_exists('WC_Payment_Gateway') && !class_exists('WC_payping') ){
 			}
 			$products = implode(' - ', $products);
 
-			$Description = 'خرید به شماره سفارش : ' . $order->get_order_number() . ' | خریدار : ' . $order->get_billing_first_name() . ' ' . $order->get_billing_last_name() . ' | محصولات : ' . $products;
+			$Description = 'خرید به شماره سفارش : ' . $order->get_order_number() . ' | توسط : ' . $order->get_billing_first_name() . ' ' . $order->get_billing_last_name() . ' | خرید از ' . get_bloginfo('name');
 			$Mobile = get_post_meta($order_id, '_billing_phone', true) ? get_post_meta($order_id, '_billing_phone', true) : '-';
 			$Email = $order->get_billing_email();
 			$Paymenter = $order->get_billing_first_name() . ' ' . $order->get_billing_last_name();
