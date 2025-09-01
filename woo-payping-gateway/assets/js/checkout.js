@@ -1,5 +1,5 @@
 const payping_settings = window.wc.wcSettings.getSetting( 'payping_gateway_data', {} );
-const payping_label = window.wp.htmlEntities.decodeEntities( payping_settings.title ) || window.wp.i18n.__( 'پرداخت از طریق پی‌پینگ', 'woocommerce' );
+const payping_label = window.wp.htmlEntities.decodeEntities( payping_settings.title ) || window.wp.i18n.__( 'پرداخت از طریق پی‌پینگ', 'payping_woocommerce' );
 const payping_Content = () => {
     return window.wp.htmlEntities.decodeEntities( payping_settings.description || '' );
 };
