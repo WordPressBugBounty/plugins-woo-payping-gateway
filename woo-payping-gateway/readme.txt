@@ -1,10 +1,10 @@
 ﻿=== PayPing Gateway For Woocommerce ===
 Contributors: payping, mahdisarani, hadihosseini
 Tags: woocommerce, payment, payping, درگاه پرداخت, gateway
-Requires at least: 6.2
-Tested up to: 6.8
-Requires PHP: 7.0.0
-Stable tag: 4.6.2
+Requires at least: 6.9
+Tested up to: 7.1
+Requires PHP: 7.4.0
+Stable tag: 4.6.3
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
@@ -31,9 +31,10 @@ This plugin follows strict privacy guidelines. When using the api.payping.ir ser
 
 == Changelog ==
 
-== 4.6.2 ==
-بهبود عملکرد افزونه
-
+== 4.6.3 ==
+رفع مشکل عدم پرداخت مجدد سبد خرید در تسویه حساب بلاکی
+رفع نمایش تکراری دکمه های پرداخت در زمان خطا
+بهبود فرایند پرداخت و بازگشت از درگاه
 == 4.6.1 ==
 بهبود عملکرد افزونه
 
