@@ -79,6 +79,58 @@ final class Payping_Api {
     }
 
     /**
+     * GET against the refund service (status, balance, configuration).
+     *
+     * The refund service lives under /v1/refund on the same host and speaks
+     * plain JSON instead of the problem+json the payment API uses, so its
+     * bodies are handed to the caller untouched.
+     */
+    public function refund_get( $url, $args ) {
+        $response = wp_safe_remote_get( $url, $args );
+
+        if ( is_wp_error( $response ) ) {
+            return Result::from_wp_error( $response );
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        $body = wp_remote_retrieve_body( $response );
+        $json = json_decode( (string) $body, true );
+
+        if ( 200 === $code && is_array( $json ) ) {
+            return Result::ok( $code )
+                ->set( 'body', $json )
+                ->set( 'trace_id', self::trace_id( $body ) );
+        }
+
+        return Result::fail( $code, self::error_message( $body, $code ) )
+            ->set( 'trace_id', self::trace_id( $body ) );
+    }
+
+    /**
+     * POST against the refund service (create refund, cancel, initialize).
+     */
+    public function refund_post( $url, $args ) {
+        $response = wp_safe_remote_post( $url, $args );
+
+        if ( is_wp_error( $response ) ) {
+            return Result::from_wp_error( $response );
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        $body = wp_remote_retrieve_body( $response );
+        $json = json_decode( (string) $body, true );
+
+        if ( 200 === $code ) {
+            return Result::ok( $code )
+                ->set( 'body', is_array( $json ) ? $json : [] )
+                ->set( 'trace_id', self::trace_id( $body ) );
+        }
+
+        return Result::fail( $code, self::error_message( $body, $code ) )
+            ->set( 'trace_id', self::trace_id( $body ) );
+    }
+
+    /**
      * Human readable message for a failed PayPing API response.
      *
      * PayPing replies with RFC 7807 problem+json errors where the
@@ -94,6 +146,22 @@ final class Payping_Api {
             foreach ( $data['metaData']['errors'] ?? [] as $error ) {
                 if ( ! empty( $error['message'] ) ) {
                     $messages[] = sanitize_text_field( $error['message'] );
+                }
+            }
+
+            // The refund service validates with a dictionary of messages
+            // per field instead of the metaData list the payment API uses.
+            if ( ! $messages && ! empty( $data['errors'] ) && is_array( $data['errors'] ) ) {
+                foreach ( $data['errors'] as $error_messages ) {
+                    if ( is_array( $error_messages ) ) {
+                        foreach ( $error_messages as $error_message ) {
+                            if ( ! empty( $error_message ) ) {
+                                $messages[] = sanitize_text_field( (string) $error_message );
+                            }
+                        }
+                    } elseif ( ! empty( $error_messages ) ) {
+                        $messages[] = sanitize_text_field( (string) $error_messages );
+                    }
                 }
             }
 

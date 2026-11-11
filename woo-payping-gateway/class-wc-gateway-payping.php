@@ -8,6 +8,7 @@ if ( class_exists( 'WC_Payment_Gateway' ) && ! class_exists( 'WC_payping' ) ) {
     class WC_payping extends WC_Payment_Gateway {
         
         private $baseurl = 'https://api.payping.ir/v3';
+        private $refund_baseurl;
         private $paypingToken;
         private $success_massage;
         private $failed_massage;
@@ -25,6 +26,16 @@ if ( class_exists( 'WC_Payment_Gateway' ) && ! class_exists( 'WC_payping' ) ) {
             $checkserver = $this->settings['ioserver'] ?? 'no';
             if ( $checkserver == 'yes' ) {
                 $this->baseurl = 'https://api.payping.io/v3';
+            }
+
+            // The refund service lives under /v1/refund on the same host.
+            $this->refund_baseurl = str_replace( '/v3', '', $this->baseurl ) . '/v1/refund';
+
+            // The refund button only appears when the merchant turned the
+            // refund system on, so refunds never fail by surprise.
+            $this->supports = array( 'products' );
+            if ( 'yes' === ( $this->settings['refund_enabled'] ?? 'no' ) ) {
+                $this->supports[] = 'refunds';
             }
             
             $this->title          = $this->settings['title'] ?? __( 'پرداخت از طریق پی‌پینگ', 'woo-payping-gateway' );
@@ -88,6 +99,7 @@ if ( class_exists( 'WC_Payment_Gateway' ) && ! class_exists( 'WC_payping' ) ) {
                 'paypingToken' => array(
                     'title'       => __( 'توکن', 'woo-payping-gateway' ),
                     'type'        => 'password',
+                    'custom_attributes' => array( 'autocomplete' => 'off' ),
                     'description' => __( 'توکن درگاه پی‌پینگ', 'woo-payping-gateway' ),
                     'default'     => '',
                     'desc_tip'    => true
@@ -108,6 +120,19 @@ if ( class_exists( 'WC_Payment_Gateway' ) && ! class_exists( 'WC_payping' ) ) {
                     'type'        => 'textarea',
                     'description' => __( 'متن پیامی که میخواهید بعد از پرداخت ناموفق به کاربر نمایش دهید را وارد نمایید . همچنین می توانید از شورت کد {fault} برای نمایش دلیل خطای رخ داده استفاده نمایید .', 'woo-payping-gateway' ),
                     'default'     => __( 'پرداخت شما ناموفق بوده است . لطفا مجددا تلاش نمایید یا در صورت بروز اشکال با مدیر سایت تماس بگیرید .', 'woo-payping-gateway' ),
+                ),
+                'refund_confing' => array(
+                    'title'       => __( 'سرویس استرداد وجه (ریفاند)', 'woo-payping-gateway' ),
+                    'type'        => 'title',
+                    'description' => __( 'با فعال‌سازی سرویس استرداد وجه، امکان بازگشت وجه در صفحه سفارش‌های پرداخت‌شده اضافه می‌شود و مبلغ به کارت پرداخت‌کننده بازمی‌گردد. برای استفاده، توکن درگاه باید دسترسی استرداد داشته باشد و کیف پول استرداد در پنل پی‌پینگ شارژ باشد.', 'woo-payping-gateway' ),
+                ),
+                'refund_enabled' => array(
+                    'title'       => __( 'فعالسازی/غیرفعالسازی', 'woo-payping-gateway' ),
+                    'type'        => 'checkbox',
+                    'label'       => __( 'فعالسازی سرویس استرداد وجه', 'woo-payping-gateway' ),
+                    'description' => $this->get_refund_status_html(),
+                    'default'     => 'no',
+                    'desc_tip'    => false,
                 )
             ) );
         }
@@ -555,6 +580,13 @@ if ( class_exists( 'WC_Payment_Gateway' ) && ! class_exists( 'WC_payping' ) ) {
                 return array( 'success' => true, 'message' => 'این سفارش از قبل پرداخت شده است.' );
             }
 
+            // WooCommerce does not count a refunded order as paid, so the
+            // visibility rule alone is not enough here: a refunded payment
+            // is never re-verified. The refund state has its own button.
+            if ( $order->has_status( 'refunded' ) || $order->get_meta( '_payping_refund_code' ) ) {
+                return array( 'success' => false, 'message' => 'این سفارش پرداخت و استرداد شده است؛ برای پیگیری بازگشت وجه از دکمه «بروزرسانی وضعیت استرداد» استفاده کنید.' );
+            }
+
             $payment_code = $order->get_meta( '_payping_payCode' );
             $refid        = $order->get_meta( '_payping_refid' );
 
@@ -658,6 +690,422 @@ if ( class_exists( 'WC_Payment_Gateway' ) && ! class_exists( 'WC_payping' ) ) {
             do_action( 'woo_payping_Admin_Reverified', $order->get_id(), $refid );
         }
 
+        /**
+         * WooCommerce refund handler: sends the amount back to the card the
+         * customer paid with, through the PayPing refund service.
+         *
+         * @return true|WP_Error
+         */
+        public function process_refund( $order_id, $amount = null, $reason = '' ) {
+            if ( 'yes' !== ( $this->settings['refund_enabled'] ?? 'no' ) ) {
+                return new WP_Error( 'payping_refund_disabled', __( 'سرویس استرداد وجه پی‌پینگ فعال نیست؛ آن را از تنظیمات درگاه فعال کنید.', 'woo-payping-gateway' ) );
+            }
+
+            $order = wc_get_order( $order_id );
+            if ( ! $order || $order->get_payment_method() !== $this->id ) {
+                return new WP_Error( 'payping_refund_order', __( 'سفارش یافت نشد یا از طریق درگاه پی‌پینگ پرداخت نشده است.', 'woo-payping-gateway' ) );
+            }
+
+            $payment_code = $order->get_meta( '_payping_payCode' );
+            if ( '' === $payment_code ) {
+                return new WP_Error( 'payping_refund_payment_code', __( 'کد پرداخت این سفارش در فروشگاه ذخیره نشده و استرداد از افزونه ممکن نیست؛ آن را از پنل پی‌پینگ انجام دهید.', 'woo-payping-gateway' ) );
+            }
+
+            // WooCommerce books the refund record before this hook
+            // runs, so the refundable rest is already reduced by the
+            // very refund being processed. A numeric amount is always
+            // sent explicitly: the rest alone can no longer tell a
+            // full refund from a partial one, and an empty amount at
+            // PayPing means the WHOLE payment back - a one-item refund
+            // on a two-item order must never become that.
+            // The wage is always taken from the merchant wallet, so
+            // the business is declared as the wage payer (2).
+            $remaining = (float) $order->get_remaining_refund_amount();
+
+            // A zero (restock-only) or negative amount passes Woo's
+            // own validation but must never reach PayPing: block it
+            // with a pointer to the manual-refund path instead.
+            if ( null !== $amount && (float) $amount <= 0 ) {
+                Payping_Order_Panel::log_event( $order, 'error', 'خطا در استرداد: مبلغ استرداد باید بیش از صفر باشد' );
+                return new WP_Error( 'payping_refund_amount', __( 'مبلغ استرداد باید بیش از صفر باشد؛ برای بازگشت کالا به انبار بدون بازگشت پول، از دکمه استرداد دستی استفاده کنید.', 'woo-payping-gateway' ) );
+            }
+
+            // Only a direct call with no amount against an emptied
+            // order is a doomed "full refund". Numeric amounts belong
+            // to a refund record WooCommerce has just validated and
+            // booked, and stay valid even at a zero rest.
+            if ( null === $amount && $remaining <= 0.01 ) {
+                Payping_Order_Panel::log_event( $order, 'error', 'خطا در استرداد: این سفارش قبلاً به‌طور کامل استرداد شده است' );
+                return new WP_Error( 'payping_refund_fully', __( 'این سفارش به‌طور کامل استرداد شده و مبلغ قابل استردادی برای آن باقی نمانده است.', 'woo-payping-gateway' ) );
+            }
+
+            // Over-amount guard for direct (programmatic) calls: in
+            // the admin flow WooCommerce itself rejects those before
+            // booking, and a booked record has already cut the rest.
+            if ( null !== $amount && (float) $amount > $remaining + 0.01 && (float) $amount > (float) $order->get_total_refunded() ) {
+                Payping_Order_Panel::log_event( $order, 'error', sprintf( 'خطا در استرداد: مبلغ استرداد (%s) بیش از مبلغ قابل استرداد این سفارش است', number_format_i18n( (float) $amount ) ) );
+                return new WP_Error( 'payping_refund_over', sprintf( __( 'مبلغ استرداد (%s تومان) بیش از مبلغ قابل استرداد این سفارش است.', 'woo-payping-gateway' ), number_format_i18n( (float) $amount ) ) );
+            }
+
+            // Full only when nothing stays booked after this refund;
+            // the label just feeds the event log.
+            $is_full      = null === $amount || $remaining <= 0.01;
+            $refund_toman = null !== $amount ? $this->get_refund_amount_in_toman( $order, (float) $amount ) : ( $this->get_stored_amount( $order ) ?: 0 );
+            $data         = array(
+                'paymentCode' => $payment_code,
+                'wagePayer'   => 2,
+            );
+
+            if ( null !== $amount ) {
+                $data['amount'] = $refund_toman;
+            }
+
+            $args = $this->get_refund_request_args( $data );
+
+            $api_url  = apply_filters( 'WC_payping_Gateway_Refund_api_url', $this->refund_baseurl . '/Create', $order_id );
+            $api_args = apply_filters( 'WC_payping_Gateway_Refund_api_args', $args, $order_id );
+
+            $api    = new WooPayping\Payping_Api();
+            $result = $api->refund_post( $api_url, $api_args );
+
+            // 401 means the token itself is rejected; 403 means the token
+            // is valid but refund access or account activation is missing.
+            if ( 401 === $result->status_code ) {
+                Payping_Order_Panel::log_event( $order, 'error', 'خطا در استرداد: توکن درگاه نامعتبر یا منقضی است' );
+                return new WP_Error( 'payping_refund_unauthorized', __( 'توکن درگاه نامعتبر یا منقضی است؛ آن را از پنل پی‌پینگ تعویض و در تنظیمات درگاه جایگزین کنید.', 'woo-payping-gateway' ) );
+            }
+            if ( 403 === $result->status_code ) {
+                Payping_Order_Panel::log_event( $order, 'error', 'خطا در استرداد: دسترسی استرداد توکن یا فعال بودن سرویس تایید نشد' );
+                return new WP_Error( 'payping_refund_forbidden', __( 'دسترسی استرداد به این توکن داده نشده یا سرویس استرداد برای حساب شما فعال نیست؛ توکنی با دسترسی ریفاند بسازید و در صورت تکرار با پشتیبانی پی‌پینگ تماس بگیرید.', 'woo-payping-gateway' ) );
+            }
+
+            if ( ! $result->ok ) {
+                Payping_Order_Panel::log_event( $order, 'error', 'خطا در استرداد: ' . $result->message, array( 'trace_id' => $result->get( 'trace_id' ) ) );
+                return new WP_Error( 'payping_refund_failed', $result->message );
+            }
+
+            $rbody       = $result->get( 'body' );
+            $refund_code = isset( $rbody['code'] ) ? sanitize_text_field( (string) $rbody['code'] ) : '';
+
+            // An empty wallet does not fail the request: PayPing keeps
+            // the operation pending and runs it after the next recharge.
+            $awaiting_recharge = ! empty( $rbody['isPendingRecharge'] );
+
+            $order->update_meta_data( '_payping_refund_code', $refund_code );
+            $order->delete_meta_data( '_payping_refund_info' );
+            $order->save();
+
+            // The wallet balance just changed: drop the cached figure
+            // from the settings card, the next check reads it live.
+            delete_transient( 'woo_payping_refund_status' );
+
+            $event = sprintf( 'ثبت استرداد %s به مبلغ %s تومان', $is_full ? 'کامل' : 'بخشی', number_format_i18n( $refund_toman ) );
+            if ( $awaiting_recharge ) {
+                $event .= ' | در انتظار شارژ کیف پول استرداد';
+            }
+            Payping_Order_Panel::log_event( $order, 'refund', $event );
+
+            /**
+             * Fires after a refund operation is created at PayPing.
+             *
+             * @param int $order_id Order id.
+             * @param string $refund_code Refund operation code.
+             * @param int|null $amount Refund amount in Toman, null for full refunds.
+             */
+            do_action( 'woo_payping_Refund_Created', $order_id, $refund_code, $is_full ? null : $data['amount'] );
+
+            return true;
+        }
+
+        /**
+         * Refresh the refund state of an order from the PayPing refund
+         * service. Updates the stored snapshot and logs state changes,
+         * but never redirects: the caller decides where the admin lands.
+         *
+         * @return array outcome: array( 'success' => bool, 'message' => string )
+         */
+        public function process_refund_status( $order ) {
+            $payment_code = $order->get_meta( '_payping_payCode' );
+            if ( '' === $payment_code ) {
+                return array( 'success' => false, 'message' => 'کد پرداخت این سفارش در فروشگاه ذخیره نشده و پیگیری استرداد ممکن نیست.' );
+            }
+
+            $api    = new WooPayping\Payping_Api();
+            $result = $api->refund_get(
+                apply_filters( 'WC_payping_Gateway_Refund_api_url', $this->refund_baseurl . '/LatestByPaymentCode/' . rawurlencode( $payment_code ), $order->get_id() ),
+                $this->get_refund_request_args()
+            );
+
+            if ( ! $result->ok ) {
+                return array( 'success' => false, 'message' => 'خطا در دریافت وضعیت استرداد: ' . $result->message );
+            }
+
+            $info = $result->get( 'body' );
+
+            $snapshot = array(
+                'state'         => isset( $info['state'] ) ? (int) $info['state'] : 0,
+                'state_label'   => isset( $info['localizedState'] ) ? sanitize_text_field( (string) $info['localizedState'] ) : '',
+                'refund_amount' => isset( $info['refundAmount'] ) ? (float) $info['refundAmount'] : 0,
+                'refund_wage'   => isset( $info['refundWage'] ) ? (float) $info['refundWage'] : 0,
+                'bank_tracking' => isset( $info['bankTrackingCode'] ) ? sanitize_text_field( (string) $info['bankTrackingCode'] ) : '',
+                'success_date'  => isset( $info['successDateTime'] ) ? sanitize_text_field( (string) $info['successDateTime'] ) : '',
+            );
+
+            $previous = $order->get_meta( '_payping_refund_info' );
+            $previous = is_array( $previous ) ? $previous : array();
+            $state_changed = $snapshot['state'] !== ( isset( $previous['state'] ) ? (int) $previous['state'] : 0 );
+
+            $order->update_meta_data( '_payping_refund_info', $snapshot );
+            $order->save();
+
+            // Only log real transitions, not repeated checks.
+            if ( $state_changed && 0 !== $snapshot['state'] ) {
+                $event = sprintf( 'وضعیت استرداد: %s | مبلغ: %s تومان', $snapshot['state_label'] ?: $snapshot['state'], number_format_i18n( $snapshot['refund_amount'] ) );
+                Payping_Order_Panel::log_event( $order, 5 === $snapshot['state'] ? 'error' : 'refund', $event );
+
+                // A moved refund probably moved the wallet too.
+                delete_transient( 'woo_payping_refund_status' );
+            }
+
+            $message = sprintf( 'وضعیت استرداد: %s | مبلغ: %s تومان', $snapshot['state_label'] ?: $snapshot['state'], number_format_i18n( $snapshot['refund_amount'] ) );
+            if ( '' !== $snapshot['bank_tracking'] ) {
+                $message .= ' | ' . __( 'کد پیگیری بانکی', 'woo-payping-gateway' ) . ': ' . $snapshot['bank_tracking'];
+            }
+
+            return array( 'success' => true, 'message' => $message );
+        }
+
+        /**
+         * Readiness check behind the settings button: verifies the token
+         * can reach the refund service, initializes it on first use and
+         * reports the wallet balance. The outcome is cached for the
+         * settings page by the caller.
+         *
+         * @return array outcome: array( 'success' => bool, 'message' => string )
+         */
+        public function check_refund_service() {
+            $api    = new WooPayping\Payping_Api();
+            $config = $api->refund_get( $this->refund_baseurl . '/UserConfiguration', $this->get_refund_request_args() );
+
+            // 401 means the token itself is rejected; 403 means the token
+            // is valid but refund access or account activation is missing.
+            if ( 401 === $config->status_code ) {
+                return array(
+                    'ok'      => false,
+                    'state'   => 'unauthorized',
+                    'message' => __( 'توکن درگاه نامعتبر یا منقضی است؛ آن را از پنل پی‌پینگ تعویض و در تنظیمات درگاه جایگزین کنید.', 'woo-payping-gateway' ),
+                );
+            }
+            if ( 403 === $config->status_code ) {
+                return array(
+                    'ok'      => false,
+                    'state'   => 'forbidden',
+                    'message' => __( 'دسترسی استرداد به این توکن داده نشده یا سرویس استرداد برای حساب شما فعال نیست؛ توکنی با دسترسی ریفاند بسازید و در صورت تکرار با پشتیبانی پی‌پینگ تماس بگیرید.', 'woo-payping-gateway' ),
+                );
+            }
+
+            if ( ! $config->ok ) {
+                return array( 'ok' => false, 'state' => 'error', 'message' => 'خطا در ارتباط با سرویس استرداد: ' . $config->message );
+            }
+
+            $body = $config->get( 'body' );
+
+            // Keep the wage tariff around for the refund confirmation.
+            $this->store_refund_config( $body );
+
+            // First use of the refund service by this merchant.
+            if ( empty( $body['userInitializationType'] ) ) {
+                $init = $api->refund_post( $this->refund_baseurl . '/InitializeUser', $this->get_refund_request_args( array() ) );
+                if ( ! $init->ok ) {
+                    return array( 'ok' => false, 'state' => 'error', 'message' => 'راه‌اندازی سرویس استرداد ناموفق بود: ' . $init->message );
+                }
+            }
+
+            $result = array(
+                'ok'      => true,
+                'state'   => 'ok',
+                'message' => __( 'سرویس استرداد پی‌پینگ فعال است.', 'woo-payping-gateway' ),
+                'balance' => null,
+                'wage'    => '',
+            );
+
+            $balance = $api->refund_get( $this->refund_baseurl . '/Balance', $this->get_refund_request_args() );
+            if ( $balance->ok ) {
+                $bbody = $balance->get( 'body' );
+                $result['balance'] = isset( $bbody['accessibleBalance'] ) ? (float) $bbody['accessibleBalance'] : 0;
+            }
+
+            if ( isset( $body['wageValue'] ) ) {
+                $result['wage'] = 1 === (int) ( $body['wageType'] ?? 0 )
+                    ? number_format_i18n( (float) $body['wageValue'] ) . '٪'
+                    : number_format_i18n( (float) $body['wageValue'] ) . ' ' . __( 'تومان', 'woo-payping-gateway' );
+            }
+
+            return $result;
+        }
+
+        /**
+         * Amount and wage preview for the admin refund confirmation: what
+         * goes back to the customer and what the wallet will be charged,
+         * based on the tariff cached from the last service check.
+         */
+        public function get_refund_wage_quote( $order, $amount = null ) {
+            $remaining = (float) $order->get_remaining_refund_amount();
+
+            // Order context for the confirmation dialog, so the admin
+            // always sees what the amount is compared against.
+            $context = array(
+                'total_label'     => number_format_i18n( $this->get_stored_amount( $order ) ?: 0 ) . ' تومان',
+                'remaining_label' => number_format_i18n( $this->get_refund_amount_in_toman( $order, $remaining ) ) . ' تومان',
+                'fully'           => $remaining <= 0.005,
+            );
+
+            // Nothing left to refund: every request is blocked, so even
+            // an empty amount (normally a full refund) cannot show up
+            // in the dialog as a normal refund.
+            if ( $remaining <= 0.005 ) {
+                return $context + array( 'over' => true );
+            }
+
+            // The refund box starts empty and WooCommerce rejects an
+            // empty submit with a raw English alert; an entered zero
+            // or negative value is the same story. Both are blocked
+            // here so the dialog says it in Persian instead. A null
+            // amount (direct calls) still means a full refund.
+            if ( '' === $amount ) {
+                return $context + array( 'invalid' => true, 'empty' => true );
+            }
+            if ( null !== $amount && (float) $amount <= 0 ) {
+                return $context + array( 'invalid' => true );
+            }
+
+            // An amount above the refundable rest is reported back, so
+            // the dialog can block it with a clear message before
+            // WooCommerce rejects it with a raw English alert.
+            if ( null !== $amount && (float) $amount > $remaining + 0.01 ) {
+                return $context + array(
+                    'over'          => true,
+                    'entered_label' => number_format_i18n( $this->get_refund_amount_in_toman( $order, (float) $amount ) ) . ' تومان',
+                );
+            }
+
+            // Mirror process_refund exactly: a numeric amount is always
+            // converted from what the merchant entered, even when it
+            // equals the rest (the last chunk of a partially refunded
+            // order). Only a null amount stands for the whole payment.
+            $is_full = null === $amount || ( (float) $amount >= $remaining - 0.01 );
+            $toman   = null !== $amount ? $this->get_refund_amount_in_toman( $order, (float) $amount ) : ( $this->get_stored_amount( $order ) ?: 0 );
+
+            $config = get_transient( 'woo_payping_refund_config' );
+            if ( ! is_array( $config ) ) {
+                $config = $this->fetch_refund_config();
+            }
+
+            $wage = null;
+            if ( is_array( $config ) && isset( $config['wageValue'] ) ) {
+                if ( 1 === (int) $config['wageType'] ) {
+                    $wage = $toman * (float) $config['wageValue'] / 100;
+                    if ( ! empty( $config['minPercentageWage'] ) ) {
+                        $wage = max( $wage, (float) $config['minPercentageWage'] );
+                    }
+                    if ( ! empty( $config['maxPercentageWage'] ) ) {
+                        $wage = min( $wage, (float) $config['maxPercentageWage'] );
+                    }
+                } else {
+                    $wage = (float) $config['wageValue'];
+                }
+            }
+
+            return $context + array(
+                'over'   => false,
+                'full'   => $is_full,
+                'amount' => (int) round( $toman ),
+                'wage'   => null === $wage ? null : (int) round( $wage ),
+            );
+        }
+
+        /**
+         * Live tariff lookup, used when nothing is cached yet.
+         */
+        private function fetch_refund_config() {
+            $api    = new WooPayping\Payping_Api();
+            $config = $api->refund_get( $this->refund_baseurl . '/UserConfiguration', $this->get_refund_request_args() );
+
+            if ( ! $config->ok ) {
+                return null;
+            }
+
+            return $this->store_refund_config( $config->get( 'body' ) );
+        }
+
+        /**
+         * Cache the wage tariff behind the confirmation dialog.
+         */
+        private function store_refund_config( $body ) {
+            $data = array(
+                'wageType'          => isset( $body['wageType'] ) ? (int) $body['wageType'] : 0,
+                'wageValue'         => isset( $body['wageValue'] ) ? (float) $body['wageValue'] : 0,
+                'minPercentageWage' => isset( $body['minPercentageWage'] ) ? (float) $body['minPercentageWage'] : null,
+                'maxPercentageWage' => isset( $body['maxPercentageWage'] ) ? (float) $body['maxPercentageWage'] : null,
+            );
+            set_transient( 'woo_payping_refund_config', $data, 6 * HOUR_IN_SECONDS );
+
+            return $data;
+        }
+
+        /**
+         * Partial refund amount converted to Toman with the rate the order
+         * was actually paid with, so later currency changes never skew the
+         * returned amount.
+         */
+        private function get_refund_amount_in_toman( $order, $amount ) {
+            $paid_amount = $this->get_stored_amount( $order );
+            $order_total = (float) $order->get_total();
+
+            if ( $paid_amount && $order_total > 0 ) {
+                return (int) round( $amount * ( $paid_amount / $order_total ) );
+            }
+
+            // Older payments without a stored amount: convert like the payment did.
+            $currency = apply_filters( 'WC_payping_Currency', $order->get_currency(), $order->get_id() );
+            return (int) round( $this->payping_check_currency( $amount, $currency ) );
+        }
+
+        /**
+         * Request args shared by every refund service call.
+         */
+        private function get_refund_request_args( $body = null ) {
+            $args = [
+                'timeout' => 45,
+                'headers' => [
+                    'X-Platform'         => 'woocommerce',
+                    'X-Platform-Version' => WOO_PAYPING_VERSION,
+                    'Authorization'      => 'Bearer ' . $this->paypingToken,
+                    'Content-Type'       => 'application/json',
+                    'Accept'             => 'application/json'
+                ]
+            ];
+
+            if ( null !== $body ) {
+                $args['body'] = wp_json_encode( $body );
+            }
+
+            return $args;
+        }
+
+        /**
+         * Inline refund status line for the settings form, fed by the
+         * cached readiness check. Remote calls happen in the admin-post
+         * handler; this only reads the cache.
+         */
+        private function get_refund_status_html() {
+            if ( ! is_admin() ) {
+                return __( 'با فعال‌سازی، دکمه بازگشت وجه به صفحه سفارش‌های پرداخت‌شده اضافه می‌شود.', 'woo-payping-gateway' );
+            }
+
+            return Payping_Order_Panel::refund_status_card();
+        }
+
         // ClientRefId sent to PayPing for this order.
         private function get_client_ref_id( $order ) {
             return (string) $order->get_order_number();
@@ -676,8 +1124,8 @@ if ( class_exists( 'WC_Payment_Gateway' ) && ! class_exists( 'WC_payping' ) ) {
             $event = sprintf( '%s | شماره کارت: %s | شماره پیگیری پرداخت: %s', $message, $cardNumber, $Transaction_ID );
             Payping_Order_Panel::log_event( $order, 'verified', $event );
 
-            // The payment code is used up.
-            $this->invalidate_payment_code( $order );
+            // The payment code and amount stay on the order: the refund
+            // service needs them after the payment is complete.
 
             do_action( 'woo_payping_Payment_Success', $order_id, $Transaction_ID );
 
@@ -715,8 +1163,8 @@ if ( class_exists( 'WC_Payment_Gateway' ) && ! class_exists( 'WC_payping' ) ) {
                 Payping_Order_Panel::log_event( $order, 'duplicate', $message );
             }
 
-            // The code was already used by the first verification.
-            $this->invalidate_payment_code( $order, $message );
+            // The code was already used by the first verification, but it
+            // stays on the order for later refunds.
 
             do_action( 'woo_payping_Payment_Duplicate', $order->get_id(), $Transaction_ID );
 

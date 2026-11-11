@@ -1,0 +1,124 @@
+/* Refund status card on the gateway settings page. */
+
+.payping-refund-card {
+    margin: 8px 0 4px;
+    padding: 10px 12px;
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-inline-start: 3px solid #8c8f94;
+    border-radius: 4px;
+    line-height: 1.8;
+}
+
+.payping-refund-card--ok { border-inline-start-color: #00a32a; }
+.payping-refund-card--error { border-inline-start-color: #d63638; }
+
+.payping-refund-card-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.payping-refund-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #8c8f94;
+    flex: 0 0 auto;
+}
+
+.payping-refund-card--ok .payping-refund-dot { background: #00a32a; }
+.payping-refund-card--error .payping-refund-dot { background: #d63638; }
+
+.payping-refund-state { font-weight: 600; }
+
+.payping-refund-card-head .payping-refund-check {
+    margin-inline-start: auto;
+}
+
+.payping-refund-card-lines {
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.payping-refund-card-lines li { padding: 2px 0; }
+
+.payping-refund-note {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: #50575e;
+}
+
+.payping-refund-time {
+    margin: 4px 0 0;
+    font-size: 11px;
+    color: #8c8f94;
+}
+
+/* Refund confirmation dialog on the order edit screen. */
+
+.payping-refund-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 160000;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.payping-refund-dialog-box {
+    width: 400px;
+    max-width: calc(100vw - 32px);
+    padding: 16px;
+    background: #fff;
+    border-radius: 6px;
+    box-shadow: 0 5px 30px rgba(0, 0, 0, 0.25);
+}
+
+.payping-refund-dialog-box h3 {
+    margin: 0 0 12px;
+    font-size: 14px;
+}
+
+.payping-refund-dialog-rows {
+    margin: 0 0 10px;
+    padding: 0;
+    list-style: none;
+    border: 1px solid #dcdcde;
+    border-radius: 4px;
+}
+
+.payping-refund-dialog-rows li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    margin: 0;
+    border-bottom: 1px solid #f0f0f1;
+}
+
+.payping-refund-dialog-rows li:last-child { border-bottom: 0; }
+
+.payping-refund-dialog-total {
+    background: #f0f6fc;
+    font-weight: 700;
+}
+
+.payping-refund-dialog-note {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: #50575e;
+    line-height: 1.7;
+}
+
+.payping-refund-dialog-note-error {
+    color: #d63638;
+    font-weight: 600;
+}
+
+.payping-refund-dialog-actions {
+    display: flex;
+    gap: 8px;
+}
